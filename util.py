@@ -5,10 +5,20 @@ except ImportError:
     exit()
 
 
-import sys
-import struct
-from os import uname
+import sys,struct,shlex,re
 
+
+def isx86():
+    return gdb.lookup_type('int').pointer().sizeof == 4
+
+def regs():
+    if isx86():
+        regs = ['eax','ebx','ecx','edx','edi','esi','ebp','esp','eip']
+    else:
+        regs = ['rax','rbx','rcx','rdx','rdi','rsi','rbp','rsp','rip'] +\
+               ['r%d' % i for i in range(8, 16)]
+
+    return regs
 
 # bash color support
 color_support = True
@@ -76,20 +86,58 @@ def error(s):
     print_error(s)
     exit
 
-def to_int(val):
+def parse_argv(args):
+
+    args = shlex.split(args)
+    options = {k: True if v.startswith('-') else myint(v) if myint(v) else v
+               for k,v in zip(args, args[1:]+["--"]) if k.startswith('-')}
+    return options
+
+
+def normalize(a):
+
+    if isnum(a):
+        return a
+
+    if type(a) == str and a in regs():
+        return getreg(a)
+
+    ## unreached
+    return None
+
+
+def normalize_long(l):
+    return (0xffffffff if isx86() else 0xffffffffffffffff) & l
+
+def getreg(r):
+
+    e = ('$' if r[0] != '$' else '' ) + r
+    return normalize_long(long(gdb.parse_and_eval(e)))
+
+def myint(val):
     sval = str(val)
 
     if sval.startswith('0x'):
         return int(sval, 16)
     else:
-        return int(sval)
+        try:
+            return int(sval)
+        except:
+            return None
+
+def isnum(x):
+    return type(x) in [int,long]
+
 
 def uint():
     return gdb.lookup_type('unsigned int')
 
-
+import traceback
 def from_ptr(val):
-    return to_int(val.cast(uint()))
+    try:
+        return myint(val.cast(uint()))
+    except:
+         traceback.print_exc(10)
 
 def get_inferior():
 
@@ -143,3 +191,72 @@ def read_proc_maps(pid):
         error("Unable to read heap address information via /proc")
 
     return libc_end,heap_begin
+
+
+def vmmap(name=None):
+
+ result = []
+ pid = get_inferior().pid
+ if not pid: # not running
+     return None
+
+ if name == "binary":
+     name = self.getfile()
+ if name is None or name == "all":
+     name = ""
+
+        # retrieve all maps
+     maps = []
+
+
+     ## olac remote
+     # if self.is_target_remote(): # remote target
+     #     tmp = tmpfile()
+     #     self.execute("remote get /proc/%s/maps %s" % (pid, tmp.name))
+     #     tmp.seek(0)
+     #     out = tmp.read()
+     #     tmp.close
+     # else: # local target
+     out = open("/proc/%s/maps" % pid).read()
+
+     p = re.compile("([0-9a-f]*)-([0-9a-f]*) ([rwxps-]*)( .*){3} (.*)")
+     matches = p.findall(out)
+     if matches:
+         for (start, end, perm, _, mapname) in matches:
+             start = myint("0x%s" % start)
+             end = myint("0x%s" % end)
+             if mapname == "":
+                 mapname = "mapped"
+             maps += [(start, end, perm, mapname)]
+
+         if myint(name) is None:
+             for (start, end, perm, mapname) in maps:
+                 if name in mapname:
+                     result += [(start, end, perm, mapname)]
+         else:
+            addr = to_int(name)
+            for (start, end, perm, mapname) in maps:
+                if start <= addr and addr < end:
+                    result += [(start, end, perm, mapname)]
+
+     return result
+
+    # @memoized
+    # def get_vmrange(self, address, maps=None):
+    #     """
+    #     Get virtual memory mapping range of an address
+
+    #     Args:
+    #         - address: target address (Int)
+    #         - maps: only find in provided maps (List)
+
+    #     Returns:
+    #         - tuple of virtual memory info (start, end, perm, mapname)
+    #     """
+    #     if maps is None:
+    #         maps = self.get_vmmap()
+    #     if maps:
+    #         for (start, end, perm, mapname) in maps:
+    #             if start <= address and end > address:
+    #                 return (start, end, perm, mapname)
+    #     return None
