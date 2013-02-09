@@ -1,0 +1,156 @@
+
+NONCONTIGUOUS_BIT = 0x2
+
+def contiguous(M):
+    return ((M.flags & NONCONTIGUOUS_BIT) == 0)
+
+def noncontiguous(M):
+    return ((M.flags & NONCONTIGUOUS_BIT) != 0)
+
+def set_noncontiguous(M, inferior=None):
+    if inferior == None:
+        inferior = get_inferior()
+
+    M.flags |= NONCONTIGUOUS_BIT
+    inferior.write_memory(M.address, struct.pack("<I", M.flags))
+
+def set_contiguous(M, inferior=None):
+    if inferior == None:
+        inferior = get_inferior()
+
+    M.flags &= ~NONCONTIGUOUS_BIT
+    inferior.write_memory(M.address, struct.pack("<I", M.flags))
+
+def get_max_fast():
+    return gdb.parse_and_eval("global_max_fast")
+
+def mutex_lock(ar_ptr, inferior=None):
+    if inferior == None:
+        inferior = get_inferior()
+
+    ar_ptr.mutex = 1
+    inferior.write_memory(ar_ptr.address, struct.pack("<I", ar_ptr.mutex))
+
+def mutex_unlock(ar_ptr, inferior=None):
+    if inferior == None:
+        inferior = get_inferior()
+
+    ar_ptr.mutex = 0
+    inferior.write_memory(ar_ptr.address, struct.pack("<I", ar_ptr.mutex))
+
+
+################################################################################
+class malloc_state:
+    "python representation of a struct malloc_state"
+
+    def __init__(self, addr=None, mem=None, inferior=None):
+        self.mutex          = 0
+        self.flags          = 0
+        self.fastbinsY      = 0
+        self.top            = 0
+        self.last_remainder = 0
+        self.bins           = 0
+        self.binmap         = 0
+        self.next           = 0
+        self.next_free      = 0 # PER_THREAD shit
+        self.system_mem     = 0
+        self.max_system_mem = 0
+
+        self.bins_off = 0x38 if SIZE_SZ == 4 else 0x68
+
+        if addr == None:
+            if mem == None:
+                error("Please specify a struct malloc_state address.")
+
+
+            self.address = None
+        else:
+            self.address = addr if isnum(addr) else from_ptr(addr)
+
+        if inferior == None and mem == None:
+            inferior = get_inferior()
+            if inferior == -1:
+                return None
+
+        if mem == None:
+            # a string of raw memory was not provided
+            try:
+                if SIZE_SZ == 4:
+                    mem = inferior.read_memory(addr, 0x450)
+                elif SIZE_SZ == 8:
+                    mem = inferior.read_memory(addr, 0x888)
+            except TypeError:
+                error("Invalid address specified.")
+
+            except RuntimeError:
+                error("Could not read address 0x%x" % addr + c_none)
+
+        if SIZE_SZ == 4:
+            (self.mutex,         \
+            self.flags)          = struct.unpack_from("<II", mem, 0x0)
+            self.fastbinsY       = struct.unpack_from("<10I", mem, 0x8)
+            (self.top,           \
+            self.last_remainder) = struct.unpack_from("<II", mem, 0x30)
+
+            self.bins            = struct.unpack_from("<254I", mem, 0x38)
+            self.binmap          = struct.unpack_from("<IIII", mem, 0x430)
+            (self.next,          \
+            self.next_free,      \
+            self.system_mem,     \
+            self.max_system_mem) = struct.unpack_from("<IIII", mem, 0x440)
+        elif SIZE_SZ == 8:
+            (self.mutex,         \
+            self.flags)          = struct.unpack_from("<II", mem, 0x0)
+            self.fastbinsY       = struct.unpack_from("<10Q", mem, 0x8)
+            (self.top,           \
+            self.last_remainder) = struct.unpack_from("<QQ", mem, 0x58)
+            self.bins            = struct.unpack_from("<254Q", mem, 0x68)
+            self.binmap          = struct.unpack_from("<IIII", mem, 0x858)
+            (self.next,          \
+            self.next_free,      \
+            self.system_mem,     \
+            self.max_system_mem) = struct.unpack_from("<QQQQ", mem, 0x868)
+
+    def write(self, inferior=None):
+        if inferior == None:
+            inferior = get_inferior()
+            if inferior == -1:
+                return None
+
+        if SIZE_SZ == 4:
+            mem = struct.pack("<275I", self.mutex, self.flags, self.fastbinsY, \
+                    self.top, self.last_remainder, self.bins, self.binmap, \
+                    self.next, self.system_mem, self.max_system_mem)
+        elif SIZE_SZ == 8:
+            mem = struct.pack("<II266QIIIIQQQ", self.mutex, self.flags, \
+                    self.fastbinsY, self.top, self.last_remainder, self.bins, \
+                    self.binmap, self.next, self.system_mem, \
+                    self.max_system_mem)
+
+        inferior.write_memory(self.address, mem)
+
+    def __str__(self):
+        self.dump()
+
+    def dump(self):
+        return "%s%s%x%s%x%s%s%lx%s%lx%s%s%s%lx%s%lx%s%lx%s%lx%s" %      \
+                (c_title + "struct malloc_state {",                 \
+                c_none + "\nmutex          = " + c_value + "0x",    \
+                self.mutex,                                         \
+                c_none + "\nflags          = " + c_value + "0x",    \
+                self.flags,                                         \
+                c_none + "\nfastbinsY      = " + c_value + "{...}", \
+                c_none + "\ntop            = " + c_value + "0x",    \
+                self.top,                                           \
+                c_none + "\nlast_remainder = " + c_value + "0x",    \
+                self.last_remainder,                                \
+                c_none + "\nbins           = " + c_value + "{...}", \
+                c_none + "\nbinmap         = " + c_value + "{...}", \
+                c_none + "\nnext           = " + c_value + "0x",    \
+                self.next,                                          \
+                c_none + "\nnext_free      = " + c_value + "0x",    \
+                self.next_free,                                     \
+                c_none + "\nsystem_mem     = " + c_value + "0x",    \
+                self.system_mem,                                    \
+                c_none + "\nmax_system_mem = " + c_value + "0x",    \
+                self.max_system_mem, c_none)

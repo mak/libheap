@@ -170,8 +170,8 @@ def pretty_print_heap_lookup(val):
 def print_fastbins(inferior, fb_base, fb_num):
     "walk and print the fast bins"
 
-    print c_title + "===================================",
-    print "Fastbins ===================================\n" + c_none
+
+    print_title("Fastbins")
 
     for fb in xrange(0,NFASTBINS):
         if fb_num != None:
@@ -211,8 +211,8 @@ def print_fastbins(inferior, fb_base, fb_num):
 def print_smallbins(inferior, sb_base, sb_num):
     "walk and print the small bins"
 
-    print c_title + "===================================",
-    print "Smallbins ==================================\n" + c_none
+
+    print("Smallbins")
 
     for sb in xrange(2,NBINS+2,2):
         if sb_num != None and sb_num!=0:
@@ -241,7 +241,7 @@ def print_smallbins(inferior, sb_base, sb_num):
             chunk = malloc_chunk(fd, inuse=False)
             print "%s%26s0x%08lx%s0x%08lx%s%s" % \
                     (c_value,"[ ",chunk.fd," | ",chunk.bk," ] ",c_none),
-            print "(%d)" % chunksize(chunk)
+            print "(%d)" % chunk.chunksize()
 
             fd = chunk.fd
 
@@ -253,8 +253,7 @@ def print_smallbins(inferior, sb_base, sb_num):
 def print_bins(inferior, fb_base, sb_base):
     "walk and print the nonempty free bins, modified from jp"
 
-    print c_title + "==================================",
-    print "Heap Dump ===================================\n" + c_none
+    print_title("Heap Dump")
 
     for fb in xrange(0,NFASTBINS):
         print_once = True
@@ -268,7 +267,7 @@ def print_bins(inferior, fb_base, sb_base):
             print "    free chunk @ " + c_value + "0x%lx" % p.fd + c_none + \
                   " - size" + c_value,
             p = malloc_chunk(p.fd, inuse=False)
-            print "0x%lx" % chunksize(p) + c_none
+            print "0x%lx" % p.chunksize() + c_none
 
     for i in xrange(1, NBINS):
         print_once = True
@@ -297,35 +296,79 @@ def print_bins(inferior, fb_base, sb_base):
 
             print c_none + "    free_chunk @ " + c_value \
                   + "0x%lx " % p.address + c_none        \
-                  + "- size " + c_value + "0x%lx" % chunksize(p) + c_none
+                  + "- size " + c_value + "0x%lx" % p.chunksize() + c_none
 
             p = malloc_chunk(first(p), inuse=False)
 
 
 ################################################################################
+def print_containing(ar_ptr,sbr_base,addr):
+    "print heap chunk containgig address"
+
+    for h in enum_heaps(ar_ptr):
+        m = chunk2mem(h)
+        s = h.chunksize()
+        if m <= addr and addr < h.address +s:
+            print "Address 0x%x belong to: "%addr
+            print "%s%14s%17s%15s%s" % (c_header, "ADDR", "SIZE", "STATUS", c_none)
+            print "%schunk     %s0x%-14lx 0x%-10lx%s" % \
+                (c_none, c_value, h.address, s, c_none),
+            if ar_ptr.top == h.address:
+                print "(top)"
+            elif inuse(h):
+                print "(inuse)"
+            else:
+                print "(free)"
+
+
+
+def print_heap_dump(ar_ptr):
+    print_title("Heap Dump")
+
+    print c_title + "Arena(s) found:" + c_none
+    try: #arena address obtained via read_var
+        print "\t arena @ 0x%x" %  ar_ptr.address
+    except: #arena address obtained via -a
+        print "\t arena @ 0x%x" % ar_ptr.address
+
+        if ar_ptr.address != ar_ptr.next:
+                #we have more than one arena
+
+            curr_arena = malloc_state(ar_ptr.next)
+            while (ar_ptr.address != curr_arena.address):
+                print "\t arena @ 0x%x" % curr_arena.address
+                curr_arena = malloc_state(curr_arena.next)
+
+                if curr_arena.address == 0:
+                    print c_error + \
+                        "ERROR: No arenas could be correctly found." + c_none
+                    break #breaking infinite loop
+
+        print ""
+
 def print_flat_listing(ar_ptr, sbrk_base):
     "print a flat listing of an arena, modified from jp and arena.c"
 
-    print c_title + "==================================",
-    print "Heap Dump ===================================\n" + c_none
+    print_title("Heap Dump")
     print "%s%14s%17s%15s%s" % (c_header, "ADDR", "SIZE", "STATUS", c_none)
     print "sbrk_base " + c_value + "0x%lx" % sbrk_base
 
-    p = malloc_chunk(sbrk_base, inuse=True, read_data=False)
+    # p = malloc_chunk(sbrk_base, inuse=True, read_data=False)
 
-    while(1):
+    # while(1):
+    for p in enum_heaps(ar_ptr):
         print "%schunk     %s0x%-14lx 0x%-10lx%s" % \
-                (c_none, c_value, p.address, chunksize(p), c_none),
+                (c_none, c_value, p.address, p.chunksize(), c_none),
 
-        if p.address == top(ar_ptr):
+        if p.address == ar_ptr.top:
             print "(top)"
-            break
+
         elif p.size == (0|PREV_INUSE):
             print "(fence)"
-            break
 
-        if inuse(p):
-            print "%s" % "(inuse)"
+
+        elif inuse(p):
+            print "(inuse)"
         else:
             p = malloc_chunk(p.address, inuse=False)
             print "(F) FD %s0x%lx%s BK %s0x%lx%s" % \
@@ -340,7 +383,7 @@ def print_flat_listing(ar_ptr, sbrk_base):
             else:
                 print ""
 
-        p = malloc_chunk(next_chunk(p), inuse=True, read_data=False)
+        #p = malloc_chunk(next_chunk(p), inuse=True, read_data=False)
 
     print c_none + "sbrk_end  " + c_value \
             + "0x%lx" % (sbrk_base + ar_ptr.system_mem) + c_none
@@ -350,14 +393,15 @@ def print_flat_listing(ar_ptr, sbrk_base):
 def print_compact_listing(ar_ptr, sbrk_base):
     "print a compact layout of the heap, modified from jp"
     print_title("Heap Dump")
-    p = malloc_chunk(sbrk_base, inuse=True, read_data=False)
+    #p = malloc_chunk(sbrk_base, inuse=True, read_data=False)
 
-    while(1):
-        if p.address == top(ar_ptr):
+    #while(1):
+    for p in enum_heaps(ar_ptr):
+        if p.address == ar_ptr.top:
             sys.stdout.write("|T|\n")
-            break
 
-        if inuse(p):
+
+        elif inuse(p):
             sys.stdout.write("|A|")
         else:
             p = malloc_chunk(p.address, inuse=False)
@@ -369,7 +413,7 @@ def print_compact_listing(ar_ptr, sbrk_base):
             else:
                 sys.stdout.write("|%d|" % bin_index(p.size))
 
-        p = malloc_chunk(next_chunk(p), inuse=True, read_data=False)
+        #p = malloc_chunk(next_chunk(p), inuse=True, read_data=False)
 
 
 ################################################################################

@@ -71,15 +71,15 @@ class print_malloc_stats(gdb.Command):
 
         while(1):
             ar_ptr = malloc_state(main_arena_address)
-            mutex_lock(ar_ptr)
+            ar_ptr.mutex_lock()
             print_title("Malloc Stats")
 
 
 
             # account for top
 
-            avail = chunksize(malloc_chunk(top(ar_ptr), inuse=True, \
-                    read_data=False))
+            avail = (malloc_chunk(top(ar_ptr), inuse=True, \
+                    read_data=False)).chunksize()
 
             nblocks = 1
 
@@ -93,21 +93,21 @@ class print_malloc_stats(gdb.Command):
 
                     p = malloc_chunk(p, inuse=False)
                     nfastblocks += 1
-                    fastavail += chunksize(p)
+                    fastavail += p.chunksize()
                     p = p.fd
 
             avail += fastavail
 
             # traverse regular bins
             for i in xrange(1, NBINS):
-                b = bin_at(ar_ptr, i)
+                b = ar_ptr.bin_at(i)
 
                 a = malloc_chunk(b,inuse=False)
                 p = malloc_chunk(first(a),inuse=False)
 
                 while p.address != b:
                     nblocks += 1
-                    avail += chunksize(p)
+                    avail += p.chunksize()
                     p = malloc_chunk(first(p), inuse=False)
 
 
@@ -121,7 +121,7 @@ class print_malloc_stats(gdb.Command):
             system_b += ar_ptr.system_mem
             in_use_b += (ar_ptr.system_mem - avail)
 
-            mutex_unlock(ar_ptr)
+            ar_ptr.mutex_unlock()
             if ar_ptr.next == ar_ptr.address:
                 break
             else:
@@ -143,175 +143,80 @@ class heap(gdb.Command):
     def __init__(self):
         super(heap, self).__init__("heap", gdb.COMMAND_DATA, gdb.COMPLETE_NONE)
 
+    def usage(self):
+        print_title("Heap Dump Help")
+        print c_title + "Options:\n" + c_none
+        print c_header + "  -a 0x1234" + c_none \
+            + "\tSpecify an arena address"
+        print c_header + "  -b" + c_none + \
+            "\t\tPrint compact bin listing (only free chunks)"
+        print c_header + "  -c" + c_none + \
+            "\t\tPrint compact arena listing (all chunks)"
+        print c_header + "  -f [#]" + c_none + \
+            "\tPrint all fast bins, or only a single fast bin"
+        print c_header + "  -l" + c_none + \
+            "\t\tPrint a flat listing of all chunks in an arena"
+        print c_header + "  -s [#]" + c_none + \
+                "\tPrint all small bins, or only a single small bin\n"
+        print c_header + "  -p 0xdeadbee" + c_none +\
+            "\tPrint chunk containing address"
+
     def invoke(self, arg, from_tty):
         "Usage can be obtained via heap -h"
 
-
-
         inferior = get_inferior()
+        args = parse_argv(arg)
 
-        if arg.find("-h") != -1:
-            print_title("Heap Dump Help")
 
-            print c_title + "Options:\n" + c_none
-            print c_header + "  -a 0x1234" + c_none \
-                    + "\tSpecify an arena address"
-            print c_header + "  -b" + c_none + \
-                    "\t\tPrint compact bin listing (only free chunks)"
-            print c_header + "  -c" + c_none + \
-                    "\t\tPrint compact arena listing (all chunks)"
-            print c_header + "  -f [#]" + c_none + \
-                    "\tPrint all fast bins, or only a single fast bin"
-            print c_header + "  -l" + c_none + \
-                    "\t\tPrint a flat listing of all chunks in an arena"
-            print c_header + "  -s [#]" + c_none + \
-                    "\tPrint all small bins, or only a single small bin\n"
+
+        if '-h' in args:
+            self.usage()
             return
 
-        a_found = f_found = s_found = p_fb = p_sb = p_b = p_l = p_c = 0
-        for item in arg.split():
-            if a_found == 1:
-                arena_address = int(item,16)
-                a_found = 0
-                continue
-            if f_found == 1:
-                f_found = 0
-                try:
-                    fb_number = int(item)
-                except:
-                    pass
-                continue
-            if s_found == 1:
-                s_found = 0
-                try:
-                    sb_number = int(item)
-                except:
-                    pass
-                continue
-            if item.find("-a") != -1:
-                a_found = 1
-            if item.find("f") != -1:
-                f_found = 1
-                fb_number = None
-                p_fb = 1
-            if item.find("s") != -1:
-                s_found = 1
-                sb_number = None
-                p_sb = 1
-            if item.find("b") != -1:
-                p_b = 1
-            if item.find("l") != -1:
-                p_l = 1
-            if item.find("c") != -1:
-                p_c = 1
+        if '-a' in args and isnum(args['-a']):
+            ar_ptr = malloc_state(args['-a'])
+        else:
+            ar_ptr = get_main_arena()
 
-        if arg.find("-a") == -1:
-            try:
-
-                main_arena = gdb.parse_and_eval('main_arena')
-                arena_address = main_arena.address
-
-            except RuntimeError:
-                error("No gdb frame is currently selected.")
-
-            except ValueError:
-                print_error("Debug glibc was not found, " \
-                    "guessing main_arena address via offset from libc.")
-
-                #find heap by offset from end of libc in /proc
-                libc_end,heap_begin = read_proc_maps(inferior.pid)
-
-                if SIZE_SZ == 4:
-                    #__malloc_initialize_hook + 0x20
-                    #offset seems to be +0x380 on debug glibc, +0x3a0 otherwise
-                    arena_address = libc_end + 0x3a0
-                elif SIZE_SZ == 8:
-                    #offset seems to be +0xe80 on debug glibc, +0xea0 otherwise
-                    arena_address = libc_end + 0xea0
-
-                if libc_end == -1:
-                    print c_error + "Invalid address read via /proc" + c_none
-                    return
-
-        if arena_address == 0:
-            error("Invalid arena address (0)")
-
-
-        ar_ptr = malloc_state(arena_address)
-
-        if len(arg) == 0:
-            if ar_ptr.next == 0:
-                print "%s%s %s 0x%x) %s" % (c_error, \
-                        "ERROR: No arenas could be correctly guessed.", \
-                        "(Nothing was found at", ar_ptr.address, c_none)
-                return
-
-
-            print_title("Heap Dump")
-
-            print c_title + "Arena(s) found:" + c_none
-            try: #arena address obtained via read_var
-                print "\t arena @ 0x%x" %  ar_ptr.address
-            except: #arena address obtained via -a
-                print "\t arena @ 0x%x" % ar_ptr.address
-
-            if ar_ptr.address != ar_ptr.next:
-                #we have more than one arena
-
-                curr_arena = malloc_state(ar_ptr.next)
-                while (ar_ptr.address != curr_arena.address):
-                    print "\t arena @ 0x%x" % curr_arena.address
-                    curr_arena = malloc_state(curr_arena.next)
-
-                    if curr_arena.address == 0:
-                        print c_error + \
-                           "ERROR: No arenas could be correctly found." + c_none
-                        break #breaking infinite loop
-
-            print ""
+        if not ar_ptr:
+            print_error("Cannot find main_arena")
             return
 
+        if not args:
+            print_heap_dump(ar_ptr)
+            return
 
+        sbrk_base = get_sbrk_base(ar_ptr)
         fb_base = ar_ptr.address + 8
         if SIZE_SZ == 4:
             sb_base = ar_ptr.address + 56
         elif SIZE_SZ == 8:
-
             sb_base = ar_ptr.address + 104
 
-        try:
-
-	    mp_ = gdb.parse_and_eval('mp_')
-            mp_address = mp_.address
-        except RuntimeError:
-            print_error("No gdb frame is currently selected.")
+        if not sbrk_base:
+            print_error("Cannot find sbrk_base")
             return
-        except ValueError:
-            print_info("Debug glibc was not found, " \
-                       "guessing mp_ address via offset from main_arena.")
 
-            if SIZE_SZ == 4:
-                mp_address = ar_ptr.address + 0x460
-            elif SIZE_SZ == 8: #offset 0x880 untested on 64bit
-                mp_address = ar_ptr.address + 0x880
-        sbrk_base = malloc_par(mp_address).sbrk_base
-
-        if p_fb:
-            print_fastbins(inferior, fb_base, fb_number)
-            print ""
-        if p_sb:
-            print_smallbins(inferior, sb_base, sb_number)
-            print ""
-        if p_b:
-            print_bins(inferior, fb_base, sb_base)
-            print ""
-        if p_l:
+        if '-l' in args:
             print_flat_listing(ar_ptr, sbrk_base)
             print ""
-        if p_c:
+        if '-b' in args:
+            print_bins(inferior, fb_base, sb_base)
+            print ""
+        if '-c' in args:
             print_compact_listing(ar_ptr, sbrk_base)
             print ""
-
+        if '-s' in args:
+            sb_number = args['-s'] if isnum(args['-s']) else None
+            print sb_number
+            print_smallbins(inferior, sb_base, sb_number)
+            print ""
+        if '-f' in args:
+            fb_number = args['-f'] if isnum(args['-f']) else None
+            print_fastbins(inferior, fb_base, fb_number)
+            print ""
+        if '-p' in args:
+            print_containing(ar_ptr,sbrk_base,normalize(args['-p']))
 
 ############################################################################
 
@@ -356,11 +261,11 @@ class print_bin_layout(gdb.Command):
             return
 
         ar_ptr = malloc_state(main_arena_address)
-        mutex_lock(ar_ptr)
+        ar_ptr.mutex_lock()
 
         print_title("Bin Layout")
 
-        b = bin_at(ar_ptr, int(arg))
+        b = ar_ptr.bin_at(int(arg))
         p = malloc_chunk(first(malloc_chunk(b, inuse=False)), inuse=False)
         print_once = True
         print_str  = ""
@@ -385,7 +290,9 @@ class print_bin_layout(gdb.Command):
         else:
             print "Bin %d empty." % int(arg)
 
-        mutex_unlock(ar_ptr)
+
+
+        ar_ptr.mutex_unlock()
 
 
 ################################################################################
